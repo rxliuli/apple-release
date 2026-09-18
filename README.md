@@ -119,11 +119,14 @@ and `zap` are often hand-written and must survive.
 
 ## Why it looks like this
 
-1. **The app's App Store signing identity comes from cloud signing, not from a local
-   certificate.** The export step (`-exportArchive` + `signingStyle: automatic` + API key)
-   gets `Cloud Managed Apple Distribution` and a managed profile from Apple. For the App
-   Store path the only local certificate that actually matters is the **installer** one,
-   which signs the `.pkg`.
+1. **The App Store signing identity comes from cloud signing when no app certificate is
+   available locally.** The export step (`-exportArchive` + `signingStyle: automatic` +
+   API key) gets a managed profile from Apple, and signs with whichever distribution
+   identity it can use: a valid `Apple Distribution` from the imported bundle when there
+   is one, otherwise a `Cloud Managed Apple Distribution`. Both are accepted by App Store
+   Connect — observed on real runs, with the same project, one of each. The certificate
+   that is *always* used from the local bundle is the **installer** one, which signs the
+   `.pkg` for macOS.
 2. **The archive step deliberately does not sign the app**: macOS archives ad-hoc
    (`CODE_SIGN_IDENTITY=-`), iOS archives unsigned. All three constraints together leave
    exactly this one option:
