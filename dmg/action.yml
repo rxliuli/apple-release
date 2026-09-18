@@ -1,0 +1,80 @@
+name: 'Apple release · notarized DMG'
+description: 'Developer ID 签名 → DMG → 公证 → 盖章，产出可直接分发的 .dmg（Homebrew / GitHub Release 那条直发渠道）。'
+
+# 跟上架的 asc 是两个不同的产物，所以是两个 action：只发上架的仓库（浏览器扩展等）
+# 不该被拖进 DMG + 公证这套依赖里。
+#
+# 逻辑全在 scripts/dmg.sh 里，本机也能直接跑（把这些输入以环境变量给出即可）。
+
+inputs:
+  certificate-base64:
+    description: '合集 p12 的 base64（里面要有 Developer ID Application 身份）'
+    required: true
+  certificate-password:
+    description: 'p12 的导出密码'
+    required: true
+  api-key:
+    description: 'App Store Connect API key（.p8 内容的 base64），公证用'
+    required: true
+  api-key-id:
+    description: 'App Store Connect API key id'
+    required: true
+  api-issuer:
+    description: 'App Store Connect API issuer id'
+    required: true
+  project:
+    description: '.xcodeproj 相对路径'
+    required: true
+  scheme:
+    description: 'scheme 名'
+    required: true
+  version:
+    description: 'MARKETING_VERSION'
+    required: true
+  build-number:
+    description: 'CFBundleVersion；留空则按 x*10000 + y*100 + z 从 version 推'
+    required: false
+    default: ''
+  signing-identity:
+    description: '签名身份全名；留空则从 keychain 里挑第一个 Developer ID Application'
+    required: false
+    default: ''
+  volume-name:
+    description: 'DMG 卷名；留空则取 .app 的名字'
+    required: false
+    default: ''
+  dmg-name:
+    description: '输出文件名；留空则为 <App>-macos.dmg'
+    required: false
+    default: ''
+  working-directory:
+    description: 'monorepo 里项目所在目录'
+    required: false
+    default: '.'
+
+outputs:
+  dmg-path:
+    description: '公证并盖章后的 .dmg 绝对路径'
+    value: ${{ steps.dmg.outputs.dmg-path }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: archive → dmg → notarize → staple
+      id: dmg
+      shell: bash
+      env:
+        WORKING_DIRECTORY: ${{ inputs.working-directory }}
+        PROJECT: ${{ inputs.project }}
+        SCHEME: ${{ inputs.scheme }}
+        VERSION: ${{ inputs.version }}
+        BUILD_NUMBER: ${{ inputs.build-number }}
+        SIGNING_IDENTITY: ${{ inputs.signing-identity }}
+        VOLUME_NAME: ${{ inputs.volume-name }}
+        DMG_NAME: ${{ inputs.dmg-name }}
+        APPLE_CERTIFICATE_BASE64: ${{ inputs.certificate-base64 }}
+        APPLE_CERTIFICATE_PASSWORD: ${{ inputs.certificate-password }}
+        APPLE_API_KEY: ${{ inputs.api-key }}
+        APPLE_API_KEY_ID: ${{ inputs.api-key-id }}
+        APPLE_API_ISSUER: ${{ inputs.api-issuer }}
+      run: ${{ github.action_path }}/../scripts/dmg.sh

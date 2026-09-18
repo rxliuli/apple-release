@@ -1,0 +1,73 @@
+name: 'Apple release · App Store Connect'
+description: '归档 → 导出 → 校验 →（可选）上传 macOS/iOS 应用到 App Store Connect。不提交审核。'
+
+# 逻辑全在 scripts/asc.sh 里：它在 CI 与本机都能直接跑（本机只需把这些输入以环境
+# 变量给出），所以不会出现「只能靠 push 试错」的流水线。这个 action 只做透传。
+#
+# 上架与直发（DMG）是两条不同的产物，各自一个 action —— 不要为了"统一"把它们
+# 合成一个：只发上架的仓库（浏览器扩展等）不该被拖进 DMG / 公证那套依赖里。
+
+inputs:
+  certificate-base64:
+    description: '合集 p12 的 base64（开发/分发/installer/Developer ID 可全在一份里，多个仓库共用）'
+    required: true
+  certificate-password:
+    description: 'p12 的导出密码'
+    required: true
+  api-key:
+    description: 'App Store Connect API key（.p8 内容的 base64）'
+    required: true
+  api-key-id:
+    description: 'App Store Connect API key id'
+    required: true
+  api-issuer:
+    description: 'App Store Connect API issuer id'
+    required: true
+  project:
+    description: '.xcodeproj 相对路径'
+    required: true
+  scheme:
+    description: 'scheme 名'
+    required: true
+  platform:
+    description: 'macos 或 ios'
+    required: true
+  version:
+    description: 'MARKETING_VERSION'
+    required: true
+  build-number:
+    description: 'CFBundleVersion；留空则按 x*10000 + y*100 + z 从 version 推'
+    required: false
+    default: ''
+  team-id:
+    description: 'Apple Developer Team ID'
+    required: true
+  release:
+    description: 'true = 真上传；其它值 = 只演练到通过 Apple 的校验为止'
+    required: false
+    default: 'false'
+  working-directory:
+    description: 'monorepo 里项目所在目录'
+    required: false
+    default: '.'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: xcodebuild archive → export → validate → upload
+      shell: bash
+      env:
+        WORKING_DIRECTORY: ${{ inputs.working-directory }}
+        PROJECT: ${{ inputs.project }}
+        SCHEME: ${{ inputs.scheme }}
+        PLATFORM: ${{ inputs.platform }}
+        VERSION: ${{ inputs.version }}
+        BUILD_NUMBER: ${{ inputs.build-number }}
+        TEAM_ID: ${{ inputs.team-id }}
+        RELEASE: ${{ inputs.release }}
+        APPLE_CERTIFICATE_BASE64: ${{ inputs.certificate-base64 }}
+        APPLE_CERTIFICATE_PASSWORD: ${{ inputs.certificate-password }}
+        APPLE_API_KEY: ${{ inputs.api-key }}
+        APPLE_API_KEY_ID: ${{ inputs.api-key-id }}
+        APPLE_API_ISSUER: ${{ inputs.api-issuer }}
+      run: ${{ github.action_path }}/../scripts/asc.sh

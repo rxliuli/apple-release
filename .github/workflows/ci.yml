@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  scripts:
+    name: Shell scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      # 这些脚本主要在 macOS runner 上被发布流程执行（一次几十分钟、还烧额度），
+      # 所以至少在这里先把语法过一遍。
+      - name: bash -n
+        run: |
+          for f in scripts/*.sh; do
+            echo "── $f"
+            bash -n "$f"
+          done
+      # shellcheck 抓的是 bash -n 看不见的东西（未加引号的展开、误用 ==、忘了 local…），
+      # 而这些脚本只在发版时才会真正跑起来。
+      - name: shellcheck
+        run: shellcheck --severity=warning scripts/*.sh
