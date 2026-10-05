@@ -1,33 +1,37 @@
 #!/usr/bin/env bash
 #
-# 把签名物料准备进一个临时 keychain —— 上架（App Store Connect）这条路唯一需要的
-# 本地物料。逻辑只有这一份，`asc` / 以后的 `dmg` 都调它。
+# Prepare the signing material into a temporary keychain - the only local material the App
+# Store Connect path needs. There is exactly one copy of this logic; `asc` and `dmg` both call it.
 #
-# 用法：
+# Usage:
 #   scripts/signing-setup.sh setup <CERT_ENV_VAR>...
 #   scripts/signing-setup.sh teardown
 #
-# 证书用**环境变量名**传（值由调用方注入，脚本自己不读 secrets），密码按
-# `<前缀>_BASE64` → `<前缀>_PASSWORD` 的约定自动推导。
-# setup 结束后向 $GITHUB_ENV（若存在）写入：
-#   SIGNING_KEYCHAIN   临时 keychain 的路径
-#   ASC_KEY_PATH       AuthKey_<keyId>.p8 的路径
+# Certificates are passed by **environment variable name** (the caller injects the values; this
+# script never reads secrets itself), and the password is derived by the convention
+# `<prefix>_BASE64` -> `<prefix>_PASSWORD`.
+# After setup it writes to $GITHUB_ENV (when present):
+#   SIGNING_KEYCHAIN   path of the temporary keychain
+#   ASC_KEY_PATH       path of AuthKey_<keyId>.p8
 #   ASC_KEY_ID         App Store Connect API key id
 #
-# 为什么必须先「导入证书」（哪怕是上架）：GitHub 的 macOS runner 每次都是空
-# keychain，而 `xcodebuild archive` 在 automatic 签名下会去要一张**开发**证书；
-# 本地没有就请 Apple 现造一张 —— 那张的私钥随 runner 一起销毁、永远不能再用，
-# 每跑一次烧一张，直到撞上 Apple 的证书上限。真实发生过：一天 10 张
-# "Apple Development: Created via API"，之后所有构建都开始失败。
+# Why the certificate has to be imported first (even for the App Store path): a GitHub macOS
+# runner always starts with an empty keychain, and under automatic signing `xcodebuild archive`
+# asks for a *development* certificate; with none locally it has Apple mint one - whose private
+# key dies with the runner and can never be used again. One certificate burned per run, until
+# Apple's certificate limit is hit. This really happened: 10 "Apple Development: Created via
+# API" certificates in one day, after which every build started failing.
 #
-# 导入的通常是**合集** p12（开发 / 分发 / installer / Developer ID 全在里），
-# 多个仓库共用一份。所以这里刻意**不查有效期、不挑身份**：合集里带着历史遗留的
-# 过期证书是常态，拿它们拦发布只会误报；真要用的那张过期时，签名或导出那一步
-# 会直接失败。
+# What gets imported is normally a **bundle** p12 (development / distribution / installer /
+# Developer ID all in one), shared across repos. So this deliberately **does not check expiry
+# or pick an identity**: it is normal for a bundle to carry historic expired certificates, and
+# using them to block a release would only produce false alarms; when the one that is actually
+# needed has expired, the signing or export step fails outright.
 
-# 既能直接执行（CI 里作为一个独立 step），也能被 `source`（asc.sh 在同一进程里调它）。
-# 后者是必须的：子进程 export 的变量传不回父进程，而 $GITHUB_ENV 只对**后续
-# step** 生效 —— 同一进程里自己调自己时它一点用都没有。
+# Works both as an executable (a standalone step in CI) and when `source`d (asc.sh calls it in
+# the same process). The latter is required: variables exported by a subprocess do not reach the
+# parent, and $GITHUB_ENV only affects **subsequent steps** - useless when calling yourself
+# within one process.
 
 set -euo pipefail
 
@@ -39,8 +43,9 @@ fail() {
   exit 1
 }
 
-# $GITHUB_ENV 只在 Actions 里存在；本机跑的时候静默跳过。
-# 同时 export 到当前进程：被 source 时（asc.sh）调用方要能直接读到这些值。
+# $GITHUB_ENV only exists inside Actions; when run locally, skip it silently.
+# Also export into the current process: when `source`d (asc.sh), the caller has to be able to
+# read these values directly.
 export_env() {
   if [ -n "${GITHUB_ENV:-}" ]; then
     printf '%s=%s\n' "$1" "$2" >>"$GITHUB_ENV"
@@ -48,10 +53,11 @@ export_env() {
   export "$1=$2"
 }
 
-# secret 里存的可能是「尾部 padding 被丢掉的 base64」，也可能直接就是 PEM。
-# 不能只用 `base64 --decode`：它对残缺输入**静默丢字节** —— 踩过一次，少一个 '='
-# 就丢 2 字节，PEM 结束行被砍成 `-----END PRIVATE KEY---`，结果 xcodebuild /
-# notarytool 在几分钟后才报一个看不懂的 invalidPEMDocument。
+# A secret may hold base64 whose trailing padding was lost, or the PEM text itself.
+# `base64 --decode` alone is not enough: on truncated input it **silently drops bytes** - this
+# bit us once. One missing '=' dropped 2 bytes, the PEM terminator became
+# `-----END PRIVATE KEY---`, and xcodebuild / notarytool only reported an incomprehensible
+# invalidPEMDocument minutes later.
 decode_base64() {
   python3 -c 'import base64,sys; s=sys.argv[1].strip(); sys.stdout.buffer.write(s.encode()+b"\n" if "BEGIN PRIVATE KEY" in s else base64.b64decode(s+"="*(-len(s)%4)))' "$1"
 }
@@ -62,21 +68,25 @@ teardown() {
   echo "Removed the temporary keychain and ~/private_keys"
 }
 
-# 从 keychain 里挑一个可用的签名身份（打印它的全名）。直发（dmg）那条路要显式钉住
-# 签名身份，上架（asc）那条路不需要（它的身份由 cloud signing 给）。
+# Pick a usable signing identity out of the keychain (prints its full name). The direct-download
+# path (dmg) pins the identity explicitly; the App Store path (asc) does not need one, because
+# its identity comes from cloud signing.
 #
-# 只看**有效**身份（-v）：合集里常有过期证书，同一个 CN 的过期/有效两张并存时，
-# 不筛就会挑到过期的那张，然后要么签名失败、要么 automatic 签名转头去造一张新的。
+# Only **valid** identities are considered (-v): a bundle frequently holds expired certificates,
+# and when an expired and a valid one share a CN, skipping this filter picks the expired one -
+# which either fails signing or makes automatic signing go and mint a fresh one.
 signing_identity() {
   local fragment="${1:?signing_identity needs an identity name fragment}"
   local valid names picked
   valid="$(security find-identity -v "${SIGNING_KEYCHAIN:-$KEYCHAIN}")"
-  # 抠名字时不能假设行尾就是引号（不受信的身份后面会跟 `(CSSMERR_TP_NOT_TRUSTED)`、
-  # 过期的跟 `(CSSMERR_TP_CERT_EXPIRED)`），所以只取第一对引号里的内容；
-  # 同时直接滤掉带 CSSMERR_ 的那些 —— 无论如何都不应该挑到一个用不了的身份。
+  # When extracting the name, do not assume the line ends with a quote (an untrusted identity is
+  # followed by `(CSSMERR_TP_NOT_TRUSTED)`, an expired one by `(CSSMERR_TP_CERT_EXPIRED)`), so take
+  # only what is inside the first pair of quotes; and drop everything carrying CSSMERR_ outright -
+  # an unusable identity must never be picked.
   names="$(printf '%s\n' "$valid" | grep -v 'CSSMERR_' | sed -n 's/^[[:space:]]*[0-9]*) [0-9A-Fa-f]\{1,\} "\([^"]*\)".*$/\1/p' || true)"
-  # 末尾的 || true 不能省：没有匹配时 grep 返回 1，在 set -e + pipefail 下整个
-  # 赋值语句会直接杀掉脚本，下面那句报错就没机会打出来（试过，真的是静默退出）。
+  # The trailing || true is not optional: grep returns 1 when nothing matches, and under
+  # set -e + pipefail that kills the whole script on the assignment, so the error below never gets
+  # a chance to print (confirmed: it really does exit silently).
   picked="$(printf '%s\n' "$names" | grep -F -- "$fragment" | head -1 || true)"
   [ -n "$picked" ] \
     || fail "no usable \"${fragment}\" identity in the keychain - signing (and everything that depends on it) needs one; without it Apple will mint a new certificate."
@@ -93,16 +103,18 @@ setup() {
     fail "neither a certificate env var nor APPLE_API_KEY was given - this step would only prepare an empty keychain"
   fi
 
-  # 同一个 runner 上重跑（或者上一步失败留下的）时先清干净
+  # Clean up first, in case this runs again on the same runner (or a previous step left it behind)
   security delete-keychain "$KEYCHAIN" >/dev/null 2>&1 || true
   security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
-  # 默认几分钟就会自动锁；发布 job 动辄几十分钟，锁了必然失败。
+  # it locks itself after a few minutes by default; a release job routinely runs for tens of
+  # minutes, and once locked it is guaranteed to fail.
   security set-keychain-settings -lut 21600 "$KEYCHAIN"
   security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
 
-  # 把临时 keychain 放到搜索列表最前面，而不是替换掉原列表：runner 上其它
-  # keychain 还要能被解析到（信任链里的 Apple 根证书就在系统 keychain 里）。
-  # 这里不能用 mapfile/readarray —— macOS 的 /bin/bash 卡在 3.2，两个内建都没有。
+  # Put the temporary keychain first in the search list instead of replacing the list: the other
+  # keychains on the runner still have to be resolvable (Apple's root certificates in the trust
+  # chain live in the system keychain).
+  # mapfile/readarray cannot be used here - macOS /bin/bash is stuck on 3.2 and has neither builtin.
   local existing=()
   while IFS= read -r line; do
     existing+=("$line")
@@ -114,8 +126,8 @@ setup() {
   fi
   security default-keychain -s "$KEYCHAIN"
 
-  # 用 if 包住而不是直接 for：bash 3.2 在 `set -u` 下展开空数组会报
-  # `certs[@]: unbound variable`（bash 4.4 才修）。
+  # Wrapped in an if rather than a plain for: under `set -u`, bash 3.2 errors with
+  # `certs[@]: unbound variable` when expanding an empty array (only fixed in bash 4.4).
   local name pw_name value password dir
   if [ ${#certs[@]} -gt 0 ]; then
     for name in "${certs[@]}"; do
@@ -131,20 +143,20 @@ setup() {
       dir="$(mktemp -d)"
       decode_base64 "$value" >"$dir/cert.p12"
 
-      # 导入的原始输出故意不重定向：它只有几行（"1 key imported" /
-      # "1 certificate imported"），而一旦后面报错，这几行就是「到底是只有证书
-      # 还是没带私钥」的唯一直接证据。
+      # The raw output of the import is deliberately not redirected: it is only a few lines
+      # ("1 key imported" / "1 certificate imported"), and when something fails later those lines
+      # are the only direct evidence of whether the p12 held just a certificate or no private key.
       #
-      # -A：允许任何程序使用导入的私钥。这只是一次性 runner 上的一次性 keychain。
-      # 换成一个一个 -T 点名（codesign/security/productbuild）看似更收敛，但少点
-      # 一个（productbuild 没被信任）会让它**静默卡在**一个永远弹不出来的 keychain
-      # 授权框上，最后以 job 超时收场 —— 已经踩过。
+      # -A: let any program use the imported private key. This is a throwaway keychain on a
+      # throwaway runner. Naming each caller individually with -T (codesign/security/productbuild)
+      # looks tighter, but missing one of them (productbuild not trusted) makes it **silently hang**
+      # on a keychain prompt that can never appear, ending in a job timeout - already been there.
       security import "$dir/cert.p12" -P "$password" -f pkcs12 -A -k "$KEYCHAIN" \
         || fail "failed to import $name (wrong password? or does the p12 hold a certificate but no private key?)"
       rm -rf "$dir"
     done
-    # 空 keychain 上跑这条会直接报 "The specified item could not be found"，
-    # 所以它必须待在导入之后。
+    # Running this against an empty keychain reports "The specified item could not be found",
+    # so it has to stay after the imports.
     security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" >/dev/null
   fi
 
@@ -156,22 +168,25 @@ setup() {
     mkdir -p "$HOME/private_keys"
     local key="$HOME/private_keys/AuthKey_${APPLE_API_KEY_ID}.p8"
     decode_base64 "$APPLE_API_KEY" >"$key"
-    # 立刻验一遍，别让残缺的 base64 在几分钟后以 invalidPEMDocument 的形式暴露
+    # Verify once right away, so a truncated base64 does not surface minutes later as
+    # invalidPEMDocument
     openssl pkey -in "$key" -noout \
       || fail "APPLE_API_KEY did not decode to a valid PKCS#8 private key ($(wc -c <"$key" | tr -d ' ') bytes). Store the base64 of the .p8 file (including the trailing '='), or the PEM text itself."
     chmod 600 "$key"
     local size sha
     size="$(wc -c <"$key" | tr -d ' ')"
     sha="$(shasum -a 256 "$key" | cut -c1-12)"
-    # 注意这里花括号不能省：macOS 的 bash 3.2 在 UTF-8 locale 下会把紧跟其后的
-    # 全角逗号当成变量名的一部分，直接报 `APPLE_API_KEY_ID，: unbound variable`。
+    # Braces are kept deliberately: on macOS's bash 3.2 a multibyte character directly after an
+    # unbraced ${VAR} is swallowed into the variable name. This line used to end with a full-width
+    # comma and tripped exactly that, so the habit stays even though the separator is ASCII now.
     echo "::notice title=ASC API key::${APPLE_API_KEY_ID}, ${size} bytes, sha256 ${sha}"
     export_env ASC_KEY_PATH "$key"
     export_env ASC_KEY_ID "$APPLE_API_KEY_ID"
   fi
 }
 
-# 直接执行时才走命令行分发；被 source 时只暴露函数（否则 sourcing 就会把 setup 跑一边）。
+# Only dispatch from the command line when executed; when `source`d, just expose the functions
+# (otherwise sourcing would run setup as a side effect).
 if [ "${BASH_SOURCE[0]:-$0}" = "$0" ]; then
   case "${1:-}" in
     setup)

@@ -1,18 +1,19 @@
 #!/usr/bin/env bash
 #
-# 更新 Homebrew tap 里某个 cask 的 version 与 sha256。
+# Update the version and sha256 of a cask in a Homebrew tap.
 #
-# 用法（环境变量）：
-#   TAP         tap 仓库（owner/repo，默认 rxliuli/homebrew-tap）
-#   TOKEN       有 push 权限的 GitHub token
-#   CASK        cask 名（对应 tap 里的 Casks/<name>.rb）
-#   VERSION     新版本号
-#   ARTIFACT    要算 sha256 的文件（通常是 .dmg）
-#   CASK_PATH   可选，cask 文件在 tap 里的相对路径（默认 Casks/<CASK>.rb）
+# Usage (environment variables):
+#   TAP         tap repo (owner/repo, default rxliuli/homebrew-tap)
+#   TOKEN       GitHub token with push access
+#   CASK        cask name (matches Casks/<name>.rb in the tap)
+#   VERSION     new version number
+#   ARTIFACT    the file to hash (usually the .dmg)
+#   CASK_PATH   optional, the cask file's path inside the tap (default Casks/<CASK>.rb)
 #
-# 只改 version / sha256 两行，不覆盖 cask 里其它内容 —— livecheck、caveats、zap
-# 都可能是手写的，整篇重写会把它们抹掉。cask 不存在就直接失败：模板里的
-# homepage / desc / caveats / zap 是每个 app 特有的，自动生成只会生成错的东西。
+# Rewrites only the version and sha256 lines and leaves the rest of the cask alone:
+# livecheck, caveats and zap are often hand-written, and rewriting the whole file
+# would wipe them. A missing cask is a hard failure - homepage, desc, caveats and zap
+# are app specific, so generating them would generate the wrong thing.
 
 set -euo pipefail
 
@@ -30,7 +31,7 @@ fail() {
 
 [ -f "$ARTIFACT" ] || fail "file not found: $ARTIFACT"
 
-# macOS 只有 shasum，ubuntu 两个都有
+# macOS only ships shasum; ubuntu has both
 if command -v sha256sum >/dev/null 2>&1; then
   SHA="$(sha256sum "$ARTIFACT" | cut -d' ' -f1)"
 else
@@ -48,8 +49,8 @@ sed -i.bak -E "s|^  version \".*\"$|  version \"${VERSION}\"|" "$FILE"
 sed -i.bak -E "s|^  sha256 \".*\"$|  sha256 \"${SHA}\"|" "$FILE"
 rm -f "$FILE.bak"
 
-# sed 没匹配上时会静默什么都不做，然后被下面那句 "已经是最新" 误报成成功 ——
-# 所以这里显式确认两行真的被改掉了。
+# When sed matches nothing it silently does nothing, and the "already current" notice
+# below would then report success - so assert that both lines really were rewritten.
 grep -qE "^  version \"${VERSION}\"$" "$FILE" || fail "could not rewrite the version line (did the cask format change?)"
 grep -qE "^  sha256 \"${SHA}\"$" "$FILE" || fail "could not rewrite the sha256 line (did the cask format change?)"
 

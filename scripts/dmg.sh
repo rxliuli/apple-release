@@ -1,26 +1,29 @@
 #!/usr/bin/env bash
 #
-# 直发渠道：Developer ID 签名 → DMG → 公证 → 盖章。macOS 专属。
+# Direct-download channel: Developer ID sign → DMG → notarize → staple. macOS only.
 #
-# 用法（环境变量）：
+# Usage (environment variables):
 #   PROJECT / SCHEME / VERSION / BUILD_NUMBER / WORKING_DIRECTORY
-#   SIGNING_IDENTITY   可选；留空则从 keychain 里挑第一个 Developer ID Application
-#   VOLUME_NAME        可选；DMG 卷名（默认取 .app 的名字）
-#   DMG_NAME           可选；输出文件名（默认 <App>-macos.dmg）
-#   WORK_DIR           可选；构建产物目录（默认 build/apple-release）
+#   SIGNING_IDENTITY   optional; when empty the first Developer ID Application in the keychain is used
+#   VOLUME_NAME        optional; DMG volume name (defaults to the .app name)
+#   DMG_NAME           optional; output file name (defaults to <App>-macos.dmg)
+#   WORK_DIR           optional; build product directory (defaults to build/apple-release)
 #   APPLE_CERTIFICATE_BASE64 / APPLE_CERTIFICATE_PASSWORD
-#   APPLE_API_KEY / APPLE_API_KEY_ID / APPLE_API_ISSUER     公证用
+#   APPLE_API_KEY / APPLE_API_KEY_ID / APPLE_API_ISSUER     for notarization
 #
-# 产物路径会写进 $GITHUB_ENV 的 DMG_PATH（同时 ::notice 打出来），供后续步骤
-# （upload-artifact / GitHub Release / tap-update）使用。
+# The product path is written to DMG_PATH in $GITHUB_ENV (and echoed as a ::notice) so
+# later steps (upload-artifact / GitHub Release / tap-update) can pick it up.
 #
-# 跟 asc 那条路的关键差别：
-#   * 这里的 app 是**真签名**（Developer ID + hardened runtime）。直发不嵌
-#     provisioning profile，没有 profile 就没有"托管身份"可依赖，必须本地持有
-#     一张有效证书 —— 所以身份是显式钉住的。
-#   * 上架那条路正好相反：automatic 签名不接受显式分发身份（Xcode 直接报
-#     conflicting settings），身份也由 cloud signing 提供。
-#   * 公证走 notarytool + ASC API key，不需要 App Store Connect 里有构建记录。
+# The key differences from the asc path:
+#   * the app here is really signed (Developer ID + hardened runtime). A direct download
+#     embeds no provisioning profile, and without a profile there is no managed identity
+#     to fall back on, so a valid certificate must exist locally - hence the identity is
+#     pinned explicitly.
+#   * the App Store path is the opposite: automatic signing rejects an explicitly given
+#     distribution identity (Xcode fails with conflicting settings), and the identity comes
+#     from cloud signing instead.
+#   * notarization goes through notarytool + an ASC API key, so no build record has to exist
+#     in App Store Connect.
 
 set -euo pipefail
 
@@ -36,15 +39,16 @@ fail() {
   exit 1
 }
 
-# 发版号与 Flutter 那条线共用同一个公式，各仓库不再各写一份
+# The build number shares the same formula as the Flutter line, so no repo keeps its own copy
 if [ -z "${BUILD_NUMBER:-}" ]; then
   IFS='.' read -r major minor patch <<<"$VERSION"
   BUILD_NUMBER=$((major * 10000 + minor * 100 + patch))
   echo "::notice title=CFBundleVersion::derived ${BUILD_NUMBER} from VERSION=${VERSION}"
 fi
 
-# ---- 签名物料 -----------------------------------------------------------
-# source 而不是起子进程：它导出的 SIGNING_KEYCHAIN / ASC_KEY_PATH 要能在本进程用到。
+# ---- signing material ---------------------------------------------------
+# `source` rather than a subprocess: the SIGNING_KEYCHAIN / ASC_KEY_PATH it exports have
+# to be visible in this process.
 # shellcheck source=./signing-setup.sh
 . "$SCRIPT_DIR/signing-setup.sh"
 setup APPLE_CERTIFICATE_BASE64
@@ -64,9 +68,10 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# ---- 1. 归档（带 Developer ID 真签名）-----------------------------------
-# 这里**不能**传 PROVISIONING_PROFILE_SPECIFIER：它是全局构建设置，会连 SwiftPM 的
-# 资源包（如 LinkPureCore_LinkPureCore）一起要求 profile，而那是纯资源包、不支持 profile。
+# ---- 1. archive (really signed with Developer ID) -----------------------
+# PROVISIONING_PROFILE_SPECIFIER must **not** be passed here: it is a global build setting,
+# so it would also demand a profile for SwiftPM resource bundles (such as
+# LinkPureCore_LinkPureCore), and a pure resource bundle does not support one.
 echo "::group::xcodebuild archive (Developer ID)"
 xcodebuild archive \
   -project "$PROJECT" \
@@ -84,15 +89,15 @@ APP="$(find "$ARCHIVE_PATH/Products/Applications" -maxdepth 1 -name '*.app' | he
 [ -n "$APP" ] || fail "no .app found in the archive"
 APP_NAME="$(basename "$APP" .app)"
 
-# ---- 2. 核对归档产物 ----------------------------------------------------
+# ---- 2. check the archive product ---------------------------------------
 echo "::group::archive product"
 codesign --verify --deep --strict --verbose=2 "$APP"
 codesign -dv --verbose=2 "$APP" 2>&1 | grep -E 'Authority=|TeamIdentifier=|flags=' || true
-# 上 Mac App Store 要 universal；这个渠道也一并保持一致
+# the Mac App Store requires universal; keep this channel consistent with it
 lipo -info "$APP/Contents/MacOS/${APP_NAME}"
 echo "::endgroup::"
 
-# ---- 3. 打 DMG ----------------------------------------------------------
+# ---- 3. build the DMG ---------------------------------------------------
 command -v create-dmg >/dev/null 2>&1 || brew install create-dmg
 VOLUME_NAME="${VOLUME_NAME:-$APP_NAME}"
 DMG_NAME="${DMG_NAME:-${APP_NAME}-macos.dmg}"
@@ -114,7 +119,7 @@ create-dmg \
 codesign --verify --verbose=2 "$DMG_PATH"
 echo "::endgroup::"
 
-# ---- 4. 公证 + 盖章 -----------------------------------------------------
+# ---- 4. notarize + staple -----------------------------------------------
 echo "::group::notarytool + stapler"
 xcrun notarytool submit "$DMG_PATH" \
   --key "$ASC_KEY_PATH" \
@@ -122,16 +127,17 @@ xcrun notarytool submit "$DMG_PATH" \
   --issuer "$API_ISSUER" \
   --wait
 xcrun stapler staple "$DMG_PATH"
-# 盖章是真的成功了，而不是 notarytool 说成功
+# the staple really succeeded, rather than notarytool claiming it did
 xcrun stapler validate "$DMG_PATH"
-# Gatekeeper 的最终判定。放在这里当"附加证据"而不是硬门：runner 上的 assess
-# 守护进程状态偶尔会给出假阴性，而 stapler validate 已经过了。
+# Gatekeeper's final verdict. Kept as supplementary evidence rather than a hard gate:
+# the assess daemon on the runner occasionally reports a false negative, and stapler
+# validate has already passed by this point.
 spctl -a -t open --context context:primary-signature -v "$DMG_PATH" \
   || echo "::warning::spctl did not pass (stapler validate did, so this is usually a Gatekeeper state issue on the runner)"
 echo "::endgroup::"
 
-# 后续步骤（upload-artifact / GitHub Release / tap-update）要用这个路径；
-# 同时写成 action output，方便调用方在别的 job 里用。
+# Later steps (upload-artifact / GitHub Release / tap-update) need this path; also emit it
+# as an action output so a caller can use it from another job.
 DMG_PATH="$(cd "$(dirname "$DMG_PATH")" && pwd)/$(basename "$DMG_PATH")"
 export DMG_PATH
 if [ -n "${GITHUB_ENV:-}" ]; then

@@ -1,38 +1,41 @@
 #!/usr/bin/env bash
 #
-# 归档 → 导出 → 校验 →（可选）上传到 App Store Connect。macOS 与 iOS 共用这一份，
-# 差别只有 scheme / destination / 归档怎么签 / 产物后缀 / altool 的 --type。
+# Archive → export → validate → (optionally) upload to App Store Connect. macOS and iOS share
+# this one script; the only differences are the scheme / destination / how the archive is
+# signed / the artifact suffix / altool's --type.
 #
-# 用法（环境变量）：
-#   PROJECT           .xcodeproj 路径（相对 WORKING_DIRECTORY）
-#   SCHEME            要构建的 scheme（iOS 与 macOS 各一个）
+# Usage (environment variables):
+#   PROJECT           path to the .xcodeproj (relative to WORKING_DIRECTORY)
+#   SCHEME            scheme to build (one for iOS, one for macOS)
 #   PLATFORM          macos | ios
-#   VERSION           MARKETING_VERSION，用于事后核对导出产物里的版本号
-#   BUILD_NUMBER      CFBundleVersion（不给就按 x*10000 + y*100 + z 从 VERSION 推）
+#   VERSION           MARKETING_VERSION, used afterwards to check the exported artifact
+#   BUILD_NUMBER      CFBundleVersion (when empty, derived from VERSION as x*10000 + y*100 + z)
 #   TEAM_ID           Apple Developer Team ID
-#   RELEASE           true = 真上传；其它值 = 只演练到"通过 Apple 的校验"为止
-#   WORKING_DIRECTORY 可选，monorepo 里项目所在目录（默认当前目录）
-#   APPLE_CERTIFICATE_BASE64 / APPLE_CERTIFICATE_PASSWORD   合集 p12（见 signing-setup.sh）
+#   RELEASE           true = really upload; anything else = rehearse up to passing Apple's validation
+#   WORKING_DIRECTORY optional, the project's directory in a monorepo (defaults to the cwd)
+#   APPLE_CERTIFICATE_BASE64 / APPLE_CERTIFICATE_PASSWORD   bundle p12 (see signing-setup.sh)
 #   APPLE_API_KEY / APPLE_API_KEY_ID / APPLE_API_ISSUER      ASC API key
 #
-#   scripts/asc.sh                     # 本机或 CI 直接跑
+#   scripts/asc.sh                     # run directly, locally or in CI
 #
-# 为什么归档阶段**不签名**（这是踩出来的，不是洁癖）：
-#   * automatic 归档想要的是**开发**身份，本地没有就会让 Apple 现造一张 —— 别人
-#     部署一次就烧一张证书（见 signing-setup.sh 顶部注释）。
-#   * Xcode **不允许**在 automatic 签名下显式指定分发身份，硬指定直接报
-#     "has conflicting provisioning settings ... has been manually specified"。
-#   * macOS 又完全不能不签：entitlements 跟着签名走，不签就丢 sandbox，
-#     ASC 校验会以 90296 拒收。
-#   三个约束叠起来只剩一个解：macOS 用 ad-hoc 签（identity "-"，只为把
-#   entitlements 带进归档），iOS 完全不签（它的 entitlements 全部来自 profile）。
-#   真正的分发签名由下面的 export 步骤完成 —— 那一步用的是 cloud signing 提供的
-#   `Cloud Managed Apple Distribution` 与托管 profile，**不需要**本地证书。
+# Why the archive step is **not signed** (learned the hard way, not fussiness):
+#   * an automatic archive wants a *development* identity, and if none exists locally it has
+#     Apple mint one - one certificate burned per deploy (see the top of signing-setup.sh).
+#   * Xcode does **not** allow an explicitly given distribution identity together with
+#     automatic signing; forcing it fails with "has conflicting provisioning settings ...
+#     has been manually specified".
+#   * macOS cannot go unsigned either: entitlements travel with the signature, an unsigned
+#     archive loses its sandbox, and ASC rejects it with 90296.
+#   The three constraints leave exactly one solution: sign macOS ad-hoc (identity "-", purely
+#   so the entitlements make it into the archive) and leave iOS unsigned (its entitlements all
+#   come from the profile). The real distribution signature happens in the export step below,
+#   which uses the `Cloud Managed Apple Distribution` identity and managed profile supplied by
+#   cloud signing - no local certificate needed.
 
 set -euo pipefail
 
-# 脚本目录要在 cd 之前算出来：下面可能切到 WORKING_DIRECTORY，
-# 那时相对的 $0 就指错地方了。
+# The script directory has to be resolved before the cd below: that may move us to
+# WORKING_DIRECTORY, at which point a relative $0 points at the wrong place.
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "${WORKING_DIRECTORY:-.}"
 
@@ -48,7 +51,7 @@ fail() {
   exit 1
 }
 
-# 发版号与 Flutter 那条线共用同一个公式，各仓库不再各写一份
+# The build number shares the same formula as the Flutter line, so no repo keeps its own copy
 if [ -z "${BUILD_NUMBER:-}" ]; then
   IFS='.' read -r major minor patch <<<"$VERSION"
   BUILD_NUMBER=$((major * 10000 + minor * 100 + patch))
@@ -58,7 +61,7 @@ fi
 case "$PLATFORM" in
   macos)
     DESTINATION='generic/platform=macOS'
-    # 归档只为把 entitlements 带进去，不需要证书也不需要 profile
+    # the archive only exists to carry the entitlements; it needs neither a certificate nor a profile
     ARCHIVE_SIGNING=(CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY=-)
     ARTIFACT_GLOB='*.pkg'
     ALTOOL_TYPE=macos
@@ -74,9 +77,9 @@ case "$PLATFORM" in
     ;;
 esac
 
-# ---- 签名物料 -----------------------------------------------------------
-# source 而不是起子进程：它导出的 SIGNING_KEYCHAIN / ASC_KEY_PATH / ASC_KEY_ID
-# 要能在本进程里直接读到。
+# ---- signing material ---------------------------------------------------
+# `source` rather than a subprocess: the SIGNING_KEYCHAIN / ASC_KEY_PATH / ASC_KEY_ID it
+# exports have to be readable in this process.
 # shellcheck source=./signing-setup.sh
 . "$SCRIPT_DIR/signing-setup.sh"
 setup APPLE_CERTIFICATE_BASE64
@@ -91,21 +94,22 @@ AUTH=(
   -authenticationKeyIssuerID "$API_ISSUER"
 )
 
-# 产物留在 caller 的工作目录里（runner 是一次性的），而不是 mktemp —— 这样「演练
-# 模式」跑完之后还能去翻 .pkg/.ipa 和 DistributionSummary。默认 build/apple-release,
-# 可用 WORK_DIR 覆盖。
+# Products stay in the caller's working directory (runners are ephemeral) rather than in a
+# mktemp - that way a rehearsal leaves the .pkg/.ipa and the DistributionSummary behind to be
+# inspected. Defaults to build/apple-release and can be overridden with WORK_DIR.
 WORK_DIR="${WORK_DIR:-build/apple-release}"
 mkdir -p "$WORK_DIR"
 ARCHIVE_PATH="$WORK_DIR/${PLATFORM}.xcarchive"
 EXPORT_PATH="$WORK_DIR/export-${PLATFORM}"
 
-# keychain 是唯一会在 runner 上留下私钥的东西，必须清掉；产物则保留。
+# The keychain is the only thing that leaves a private key behind on the runner, so it must
+# be removed; the products are kept.
 cleanup() {
   teardown
 }
 trap cleanup EXIT
 
-# ---- 1. 归档 ------------------------------------------------------------
+# ---- 1. archive ---------------------------------------------------------
 echo "::group::xcodebuild archive (${PLATFORM}, unsigned archive)"
 xcodebuild archive \
   -project "$PROJECT" \
@@ -118,8 +122,8 @@ xcodebuild archive \
   "${ARCHIVE_SIGNING[@]}"
 echo "::endgroup::"
 
-# macOS 的归档必须是 ad-hoc 签名且带着 entitlements —— 这是上面那段注释里的第 3 条
-# 约束，也是历史上真被 ASC 用 90296 拒过一次的地方。所以在这里当场断言。
+# A macOS archive must be ad-hoc signed and carry the entitlements - constraint 3 from the
+# comment block above, and something ASC really did reject once with 90296. So assert it here.
 if [ "$PLATFORM" = macos ]; then
   APP="$(find "$ARCHIVE_PATH/Products/Applications" -maxdepth 1 -name '*.app' | head -1)"
   [ -n "$APP" ] || fail "no .app found in the archive"
@@ -130,9 +134,10 @@ if [ "$PLATFORM" = macos ]; then
     || fail "the archived app is missing the app-sandbox entitlement (did someone delete the ad-hoc signing line?)"
 fi
 
-# ---- 2. 导出（真正签名的那一步）----------------------------------------
-# manageAppVersionAndBuildNumber=false 关掉「导出时自动 +1 build 号」——
-# 默认开着的话 Xcode 会把指定的 build 号改掉，发布就不可复现了。
+# ---- 2. export (the step that really signs) -----------------------------
+# manageAppVersionAndBuildNumber=false disables the "bump the build number on export"
+# behaviour: left on, Xcode rewrites the build number we specified and the release is no
+# longer reproducible.
 cat >"$WORK_DIR/ExportOptions.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -159,9 +164,9 @@ echo "::endgroup::"
 ARTIFACT="$(find "$EXPORT_PATH" -name "$ARTIFACT_GLOB" | head -1)"
 [ -n "$ARTIFACT" ] || fail "no ${ARTIFACT_GLOB} in the export directory: $(ls -la "$EXPORT_PATH")"
 
-# ---- 3. 核对产物 --------------------------------------------------------
-# DistributionSummary 里有实际用的证书、profile、entitlements 和 build 号，
-# 出问题时这一行就是最有用的线索。
+# ---- 3. check the artifact ----------------------------------------------
+# DistributionSummary holds the certificate, profile, entitlements and build number that were
+# actually used, so when something goes wrong this line is the most useful lead.
 echo "::group::exported artifact"
 echo "artifact: $ARTIFACT"
 if [ "$PLATFORM" = macos ]; then
@@ -170,9 +175,10 @@ fi
 plutil -p "$EXPORT_PATH/DistributionSummary.plist" 2>/dev/null || true
 echo "::endgroup::"
 
-# ---- 4. 校验 + 上传 -----------------------------------------------------
-# 校验（--validate-app）在**上传之前**让 Apple 过一遍，是这个脚本存在的意义之一：
-# RELEASE=false 时整条流水线就跑到这里为止，即"演练到能通过 Apple 的校验"。
+# ---- 4. validate + upload -----------------------------------------------
+# Validation (--validate-app) lets Apple review the build *before* uploading, and that is one
+# of the reasons this script exists: with RELEASE=false the whole pipeline stops here, i.e.
+# "rehearse up to passing Apple's validation".
 echo "::group::altool --validate-app"
 xcrun altool --validate-app --type "$ALTOOL_TYPE" --file "$ARTIFACT" \
   --apiKey "$ASC_KEY_ID" --apiIssuer "$API_ISSUER"
