@@ -36,11 +36,11 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "${WORKING_DIRECTORY:-.}"
 
-PROJECT="${PROJECT:?PROJECT 是必须的（.xcodeproj 路径）}"
-SCHEME="${SCHEME:?SCHEME 是必须的}"
-PLATFORM="${PLATFORM:?PLATFORM 是必须的（macos | ios）}"
-VERSION="${VERSION:?VERSION 是必须的}"
-TEAM_ID="${TEAM_ID:?TEAM_ID 是必须的}"
+PROJECT="${PROJECT:?PROJECT is required (path to the .xcodeproj)}"
+SCHEME="${SCHEME:?SCHEME is required}"
+PLATFORM="${PLATFORM:?PLATFORM is required (macos | ios)}"
+VERSION="${VERSION:?VERSION is required}"
+TEAM_ID="${TEAM_ID:?TEAM_ID is required}"
 RELEASE="${RELEASE:-false}"
 
 fail() {
@@ -52,7 +52,7 @@ fail() {
 if [ -z "${BUILD_NUMBER:-}" ]; then
   IFS='.' read -r major minor patch <<<"$VERSION"
   BUILD_NUMBER=$((major * 10000 + minor * 100 + patch))
-  echo "::notice title=CFBundleVersion::按 VERSION=${VERSION} 推出 ${BUILD_NUMBER}"
+  echo "::notice title=CFBundleVersion::derived ${BUILD_NUMBER} from VERSION=${VERSION}"
 fi
 
 case "$PLATFORM" in
@@ -70,7 +70,7 @@ case "$PLATFORM" in
     ALTOOL_TYPE=ios
     ;;
   *)
-    fail "PLATFORM 只能是 macos 或 ios，收到的是 '${PLATFORM}'"
+    fail "PLATFORM must be macos or ios, got '${PLATFORM}'"
     ;;
 esac
 
@@ -80,9 +80,9 @@ esac
 # shellcheck source=./signing-setup.sh
 . "$SCRIPT_DIR/signing-setup.sh"
 setup APPLE_CERTIFICATE_BASE64
-: "${ASC_KEY_PATH:?签名物料里没有拿到 ASC_KEY_PATH}"
-: "${ASC_KEY_ID:?签名物料里没有拿到 ASC_KEY_ID}"
-API_ISSUER="${APPLE_API_ISSUER:?APPLE_API_ISSUER 是必须的}"
+: "${ASC_KEY_PATH:?signing material did not provide ASC_KEY_PATH}"
+: "${ASC_KEY_ID:?signing material did not provide ASC_KEY_ID}"
+API_ISSUER="${APPLE_API_ISSUER:?APPLE_API_ISSUER is required}"
 
 AUTH=(
   -allowProvisioningUpdates
@@ -106,7 +106,7 @@ cleanup() {
 trap cleanup EXIT
 
 # ---- 1. 归档 ------------------------------------------------------------
-echo "::group::xcodebuild archive (${PLATFORM}, 不签名的归档)"
+echo "::group::xcodebuild archive (${PLATFORM}, unsigned archive)"
 xcodebuild archive \
   -project "$PROJECT" \
   -scheme "$SCHEME" \
@@ -122,12 +122,12 @@ echo "::endgroup::"
 # 约束，也是历史上真被 ASC 用 90296 拒过一次的地方。所以在这里当场断言。
 if [ "$PLATFORM" = macos ]; then
   APP="$(find "$ARCHIVE_PATH/Products/Applications" -maxdepth 1 -name '*.app' | head -1)"
-  [ -n "$APP" ] || fail "归档里没有找到 .app"
+  [ -n "$APP" ] || fail "no .app found in the archive"
   codesign --verify --verbose=2 "$APP"
   codesign -dv --verbose=2 "$APP" 2>&1 | grep -E 'Authority=|TeamIdentifier=' || true
   codesign -d --entitlements - --xml "$APP" | plutil -p -
   codesign -d --entitlements - --xml "$APP" | plutil -p - | grep -q 'com.apple.security.app-sandbox' \
-    || fail "归档里的 app 缺 app-sandbox entitlement（ad-hoc 签名那行被谁删了？）"
+    || fail "the archived app is missing the app-sandbox entitlement (did someone delete the ad-hoc signing line?)"
 fi
 
 # ---- 2. 导出（真正签名的那一步）----------------------------------------
@@ -157,12 +157,12 @@ xcodebuild -exportArchive \
 echo "::endgroup::"
 
 ARTIFACT="$(find "$EXPORT_PATH" -name "$ARTIFACT_GLOB" | head -1)"
-[ -n "$ARTIFACT" ] || fail "导出目录里没有 ${ARTIFACT_GLOB}：$(ls -la "$EXPORT_PATH")"
+[ -n "$ARTIFACT" ] || fail "no ${ARTIFACT_GLOB} in the export directory: $(ls -la "$EXPORT_PATH")"
 
 # ---- 3. 核对产物 --------------------------------------------------------
 # DistributionSummary 里有实际用的证书、profile、entitlements 和 build 号，
 # 出问题时这一行就是最有用的线索。
-echo "::group::导出的产物"
+echo "::group::exported artifact"
 echo "artifact: $ARTIFACT"
 if [ "$PLATFORM" = macos ]; then
   pkgutil --check-signature "$ARTIFACT"
@@ -183,7 +183,7 @@ if [ "$RELEASE" = true ]; then
   xcrun altool --upload-app --type "$ALTOOL_TYPE" --file "$ARTIFACT" \
     --apiKey "$ASC_KEY_ID" --apiIssuer "$API_ISSUER"
   echo "::endgroup::"
-  echo "::notice title=已上传 App Store Connect::${SCHEME} ${VERSION} (${BUILD_NUMBER}) → ${ARTIFACT}"
+  echo "::notice title=Uploaded to App Store Connect::${SCHEME} ${VERSION} (${BUILD_NUMBER}) → ${ARTIFACT}"
 else
-  echo "::notice title=演练模式（未上传）::RELEASE != true，产物留在 ${ARTIFACT}"
+  echo "::notice title=Rehearsal (nothing uploaded)::RELEASE != true, artifact left at ${ARTIFACT}"
 fi

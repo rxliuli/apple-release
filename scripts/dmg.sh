@@ -27,9 +27,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "${WORKING_DIRECTORY:-.}"
 
-PROJECT="${PROJECT:?PROJECT 是必须的（.xcodeproj 路径）}"
-SCHEME="${SCHEME:?SCHEME 是必须的}"
-VERSION="${VERSION:?VERSION 是必须的}"
+PROJECT="${PROJECT:?PROJECT is required (path to the .xcodeproj)}"
+SCHEME="${SCHEME:?SCHEME is required}"
+VERSION="${VERSION:?VERSION is required}"
 
 fail() {
   echo "::error::$*" >&2
@@ -40,7 +40,7 @@ fail() {
 if [ -z "${BUILD_NUMBER:-}" ]; then
   IFS='.' read -r major minor patch <<<"$VERSION"
   BUILD_NUMBER=$((major * 10000 + minor * 100 + patch))
-  echo "::notice title=CFBundleVersion::按 VERSION=${VERSION} 推出 ${BUILD_NUMBER}"
+  echo "::notice title=CFBundleVersion::derived ${BUILD_NUMBER} from VERSION=${VERSION}"
 fi
 
 # ---- 签名物料 -----------------------------------------------------------
@@ -48,12 +48,12 @@ fi
 # shellcheck source=./signing-setup.sh
 . "$SCRIPT_DIR/signing-setup.sh"
 setup APPLE_CERTIFICATE_BASE64
-: "${ASC_KEY_PATH:?签名物料里没有拿到 ASC_KEY_PATH}"
-: "${ASC_KEY_ID:?签名物料里没有拿到 ASC_KEY_ID}"
-API_ISSUER="${APPLE_API_ISSUER:?APPLE_API_ISSUER 是必须的}"
+: "${ASC_KEY_PATH:?signing material did not provide ASC_KEY_PATH}"
+: "${ASC_KEY_ID:?signing material did not provide ASC_KEY_ID}"
+API_ISSUER="${APPLE_API_ISSUER:?APPLE_API_ISSUER is required}"
 
 IDENTITY="${SIGNING_IDENTITY:-$(signing_identity 'Developer ID Application')}"
-echo "::notice title=签名身份::${IDENTITY}"
+echo "::notice title=Signing identity::${IDENTITY}"
 
 WORK_DIR="${WORK_DIR:-build/apple-release}"
 mkdir -p "$WORK_DIR"
@@ -81,11 +81,11 @@ xcodebuild archive \
 echo "::endgroup::"
 
 APP="$(find "$ARCHIVE_PATH/Products/Applications" -maxdepth 1 -name '*.app' | head -1)"
-[ -n "$APP" ] || fail "归档里没有找到 .app"
+[ -n "$APP" ] || fail "no .app found in the archive"
 APP_NAME="$(basename "$APP" .app)"
 
 # ---- 2. 核对归档产物 ----------------------------------------------------
-echo "::group::归档产物"
+echo "::group::archive product"
 codesign --verify --deep --strict --verbose=2 "$APP"
 codesign -dv --verbose=2 "$APP" 2>&1 | grep -E 'Authority=|TeamIdentifier=|flags=' || true
 # 上 Mac App Store 要 universal；这个渠道也一并保持一致
@@ -127,7 +127,7 @@ xcrun stapler validate "$DMG_PATH"
 # Gatekeeper 的最终判定。放在这里当"附加证据"而不是硬门：runner 上的 assess
 # 守护进程状态偶尔会给出假阴性，而 stapler validate 已经过了。
 spctl -a -t open --context context:primary-signature -v "$DMG_PATH" \
-  || echo "::warning::spctl 未通过（stapler validate 已通过，通常是 runner 上的 Gatekeeper 状态问题）"
+  || echo "::warning::spctl did not pass (stapler validate did, so this is usually a Gatekeeper state issue on the runner)"
 echo "::endgroup::"
 
 # 后续步骤（upload-artifact / GitHub Release / tap-update）要用这个路径；
@@ -140,4 +140,4 @@ fi
 if [ -n "${GITHUB_OUTPUT:-}" ]; then
   printf 'dmg-path=%s\n' "$DMG_PATH" >>"$GITHUB_OUTPUT"
 fi
-echo "::notice title=公证过的 DMG::${DMG_PATH}"
+echo "::notice title=Notarized DMG::${DMG_PATH}"

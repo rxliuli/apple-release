@@ -59,7 +59,7 @@ decode_base64() {
 teardown() {
   security delete-keychain "${SIGNING_KEYCHAIN:-$KEYCHAIN}" >/dev/null 2>&1 || true
   rm -rf "$HOME/private_keys"
-  echo "已清理临时 keychain 与 ~/private_keys"
+  echo "Removed the temporary keychain and ~/private_keys"
 }
 
 # 从 keychain 里挑一个可用的签名身份（打印它的全名）。直发（dmg）那条路要显式钉住
@@ -68,7 +68,7 @@ teardown() {
 # 只看**有效**身份（-v）：合集里常有过期证书，同一个 CN 的过期/有效两张并存时，
 # 不筛就会挑到过期的那张，然后要么签名失败、要么 automatic 签名转头去造一张新的。
 signing_identity() {
-  local fragment="${1:?signing_identity 需要一个身份名片段}"
+  local fragment="${1:?signing_identity needs an identity name fragment}"
   local valid names picked
   valid="$(security find-identity -v "${SIGNING_KEYCHAIN:-$KEYCHAIN}")"
   # 抠名字时不能假设行尾就是引号（不受信的身份后面会跟 `(CSSMERR_TP_NOT_TRUSTED)`、
@@ -79,7 +79,7 @@ signing_identity() {
   # 赋值语句会直接杀掉脚本，下面那句报错就没机会打出来（试过，真的是静默退出）。
   picked="$(printf '%s\n' "$names" | grep -F -- "$fragment" | head -1 || true)"
   [ -n "$picked" ] \
-    || fail "keychain 里没有可用的 \"${fragment}\" 身份 —— 签名（以及依赖签名的那一步）需要它；缺了就只能让 Apple 现造一张。"
+    || fail "no usable \"${fragment}\" identity in the keychain - signing (and everything that depends on it) needs one; without it Apple will mint a new certificate."
   printf '%s' "$picked"
 }
 
@@ -90,7 +90,7 @@ setup() {
     shift
   done
   if [ ${#certs[@]} -eq 0 ] && [ -z "${APPLE_API_KEY:-}" ]; then
-    fail "既没给证书环境变量，也没给 APPLE_API_KEY —— 那这一步只是准备了一个空 keychain"
+    fail "neither a certificate env var nor APPLE_API_KEY was given - this step would only prepare an empty keychain"
   fi
 
   # 同一个 runner 上重跑（或者上一步失败留下的）时先清干净
@@ -125,8 +125,8 @@ setup() {
       esac
       value="${!name:-}"
       password="${!pw_name:-}"
-      [ -n "$value" ] || fail "$name 是空的（secret 没配？）"
-      [ -n "$password" ] || fail "$pw_name 是空的（secret 被设成空值了？）"
+      [ -n "$value" ] || fail "$name is empty (is the secret missing?)"
+      [ -n "$password" ] || fail "$pw_name is empty (was the secret set to an empty value?)"
 
       dir="$(mktemp -d)"
       decode_base64 "$value" >"$dir/cert.p12"
@@ -140,7 +140,7 @@ setup() {
       # 一个（productbuild 没被信任）会让它**静默卡在**一个永远弹不出来的 keychain
       # 授权框上，最后以 job 超时收场 —— 已经踩过。
       security import "$dir/cert.p12" -P "$password" -f pkcs12 -A -k "$KEYCHAIN" \
-        || fail "$name 导入失败（密码不对？或者 p12 里只有证书没有私钥？）"
+        || fail "failed to import $name (wrong password? or does the p12 hold a certificate but no private key?)"
       rm -rf "$dir"
     done
     # 空 keychain 上跑这条会直接报 "The specified item could not be found"，
@@ -152,20 +152,20 @@ setup() {
 
   if [ -n "${APPLE_API_KEY:-}" ]; then
     [ -n "${APPLE_API_KEY_ID:-}" ] \
-      || fail "APPLE_API_KEY_ID 是空的（secret 被设成空值了？）—— 文件名与 -authenticationKeyID 都会错。"
+      || fail "APPLE_API_KEY_ID is empty (was the secret set to an empty value?) - both the file name and -authenticationKeyID would be wrong."
     mkdir -p "$HOME/private_keys"
     local key="$HOME/private_keys/AuthKey_${APPLE_API_KEY_ID}.p8"
     decode_base64 "$APPLE_API_KEY" >"$key"
     # 立刻验一遍，别让残缺的 base64 在几分钟后以 invalidPEMDocument 的形式暴露
     openssl pkey -in "$key" -noout \
-      || fail "APPLE_API_KEY 解出来不是合法的 PKCS#8 私钥（$(wc -c <"$key" | tr -d ' ') 字节）。应该存 p8 文件的 base64（含结尾的 '='），或者直接存 PEM 全文。"
+      || fail "APPLE_API_KEY did not decode to a valid PKCS#8 private key ($(wc -c <"$key" | tr -d ' ') bytes). Store the base64 of the .p8 file (including the trailing '='), or the PEM text itself."
     chmod 600 "$key"
     local size sha
     size="$(wc -c <"$key" | tr -d ' ')"
     sha="$(shasum -a 256 "$key" | cut -c1-12)"
     # 注意这里花括号不能省：macOS 的 bash 3.2 在 UTF-8 locale 下会把紧跟其后的
     # 全角逗号当成变量名的一部分，直接报 `APPLE_API_KEY_ID，: unbound variable`。
-    echo "::notice title=ASC API key::${APPLE_API_KEY_ID}，${size} 字节，sha256 ${sha}"
+    echo "::notice title=ASC API key::${APPLE_API_KEY_ID}, ${size} bytes, sha256 ${sha}"
     export_env ASC_KEY_PATH "$key"
     export_env ASC_KEY_ID "$APPLE_API_KEY_ID"
   fi
@@ -182,7 +182,7 @@ if [ "${BASH_SOURCE[0]:-$0}" = "$0" ]; then
       teardown
       ;;
     *)
-      fail "用法：$(basename "$0") setup [<CERT_ENV_VAR>...] | teardown"
+      fail "usage: $(basename "$0") setup [<CERT_ENV_VAR>...] | teardown"
       ;;
   esac
 fi

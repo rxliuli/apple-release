@@ -1,29 +1,30 @@
 name: 'Apple release · Homebrew cask'
-description: '把 Homebrew tap 里某个 cask 的 version 与 sha256 更新到刚发布的产物。'
+description: "Bump a Homebrew tap cask's version and sha256 to a just-released artifact."
 
-# 跟 Apple 无关的独立产物，所以单独一个 action：发 brew 的仓库调它，不发的仓库
-# 完全不用管。（市面上那个 action-homebrew-bump-cask 是 9 star / 2021 年停更，
-# 官方 Homebrew/actions 只服务官方仓库，第三方 tap 没有可用的现成件。）
+# Unrelated to Apple, hence its own action: repos that publish to brew call it, repos that
+# do not can ignore it. (The action-homebrew-bump-cask on the marketplace is 9 stars and
+# unmaintained since 2021, and the official Homebrew/actions only serve official repos, so
+# there is nothing off-the-shelf for third-party taps.)
 
 inputs:
   cask:
-    description: 'cask 名（对应 tap 里的 Casks/<name>.rb）'
+    description: 'cask name (matches Casks/<name>.rb in the tap)'
     required: true
   version:
-    description: '新版本号'
+    description: 'new version number'
     required: true
   artifact:
-    description: '要发布的文件（DMG 包就是 cask 里 url 指向的那个 .dmg），据此算 sha256'
+    description: 'the file being released (the .dmg the cask url points at), used to compute sha256'
     required: true
   token:
-    description: '有 tap 仓库 push 权限的 GitHub token'
+    description: 'GitHub token with push access to the tap repo'
     required: true
   tap:
-    description: 'tap 仓库（owner/repo）'
+    description: 'tap repo (owner/repo)'
     required: false
     default: 'rxliuli/homebrew-tap'
   cask-path:
-    description: 'cask 文件在 tap 里的相对路径；留空则为 Casks/<cask>.rb'
+    description: "relative path of the cask file inside the tap; when empty it is Casks/<cask>.rb"
     required: false
     default: ''
 

@@ -17,10 +17,10 @@
 set -euo pipefail
 
 TAP="${TAP:-rxliuli/homebrew-tap}"
-CASK="${CASK:?CASK 是必须的（cask 名）}"
-VERSION="${VERSION:?VERSION 是必须的}"
-ARTIFACT="${ARTIFACT:?ARTIFACT 是必须的（要发布、并据此算 sha256 的文件）}"
-TOKEN="${TOKEN:?TOKEN 是必须的（有 push 权限的 GitHub token）}"
+CASK="${CASK:?CASK is required (cask name)}"
+VERSION="${VERSION:?VERSION is required}"
+ARTIFACT="${ARTIFACT:?ARTIFACT is required (the file being released, used to compute sha256)}"
+TOKEN="${TOKEN:?TOKEN is required (a GitHub token with push access)}"
 CASK_PATH="${CASK_PATH:-Casks/${CASK}.rb}"
 
 fail() {
@@ -28,7 +28,7 @@ fail() {
   exit 1
 }
 
-[ -f "$ARTIFACT" ] || fail "找不到文件：$ARTIFACT"
+[ -f "$ARTIFACT" ] || fail "file not found: $ARTIFACT"
 
 # macOS 只有 shasum，ubuntu 两个都有
 if command -v sha256sum >/dev/null 2>&1; then
@@ -42,7 +42,7 @@ trap 'rm -rf "$WORK"' EXIT
 
 git clone --depth 1 "https://x-access-token:${TOKEN}@github.com/${TAP}.git" "$WORK/tap" >/dev/null
 FILE="$WORK/tap/$CASK_PATH"
-[ -f "$FILE" ] || fail "${TAP} 里没有 ${CASK_PATH} —— 新 cask 要手写（模板里那些 app 特有的字段没法自动生成）"
+[ -f "$FILE" ] || fail "${TAP} has no ${CASK_PATH} - a new cask has to be written by hand (the app-specific fields in the template cannot be generated)"
 
 sed -i.bak -E "s|^  version \".*\"$|  version \"${VERSION}\"|" "$FILE"
 sed -i.bak -E "s|^  sha256 \".*\"$|  sha256 \"${SHA}\"|" "$FILE"
@@ -50,13 +50,13 @@ rm -f "$FILE.bak"
 
 # sed 没匹配上时会静默什么都不做，然后被下面那句 "已经是最新" 误报成成功 ——
 # 所以这里显式确认两行真的被改掉了。
-grep -qE "^  version \"${VERSION}\"$" "$FILE" || fail "没能改掉 version 行（cask 格式变了？）"
-grep -qE "^  sha256 \"${SHA}\"$" "$FILE" || fail "没能改掉 sha256 行（cask 格式变了？）"
+grep -qE "^  version \"${VERSION}\"$" "$FILE" || fail "could not rewrite the version line (did the cask format change?)"
+grep -qE "^  sha256 \"${SHA}\"$" "$FILE" || fail "could not rewrite the sha256 line (did the cask format change?)"
 
 cd "$WORK/tap"
 git add "$CASK_PATH"
 if git diff --cached --quiet; then
-  echo "::notice title=cask 已是最新::${CASK} 已经是 v${VERSION} / ${SHA}"
+  echo "::notice title=cask already current::${CASK} is already v${VERSION} / ${SHA}"
   exit 0
 fi
 
@@ -64,4 +64,4 @@ git -c user.name="github-actions[bot]" \
     -c user.email="github-actions[bot]@users.noreply.github.com" \
     commit -m "chore: bump ${CASK} to v${VERSION}" >/dev/null
 git push
-echo "::notice title=cask 已更新::${TAP} 的 ${CASK} → v${VERSION}（sha256 ${SHA}）"
+echo "::notice title=cask updated::${TAP} ${CASK} → v${VERSION} (sha256 ${SHA})"

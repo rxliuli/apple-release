@@ -1,20 +1,22 @@
 name: 'Apple release · notarized DMG'
-description: 'Developer ID 签名 → DMG → 公证 → 盖章，产出可直接分发的 .dmg（Homebrew / GitHub Release 那条直发渠道）。'
+description: 'Developer ID sign → DMG → notarize → staple, producing a directly distributable .dmg (the direct-download channel used by Homebrew / GitHub Releases).'
 
-# 跟上架的 asc 是两个不同的产物，所以是两个 action：只发上架的仓库（浏览器扩展等）
-# 不该被拖进 DMG + 公证这套依赖里。
+# This is a different deliverable from the App Store one, hence a separate action: a repo
+# that only ships to the App Store (browser extensions, etc.) should not be dragged into
+# the DMG and notarization dependencies.
 #
-# 逻辑全在 scripts/dmg.sh 里，本机也能直接跑（把这些输入以环境变量给出即可）。
+# All the logic lives in scripts/dmg.sh, which also runs locally (pass these inputs as
+# environment variables).
 
 inputs:
   certificate-base64:
-    description: '合集 p12 的 base64（里面要有 Developer ID Application 身份）'
+    description: 'base64 of the bundle .p12 (must contain a Developer ID Application identity)'
     required: true
   certificate-password:
-    description: 'p12 的导出密码'
+    description: 'export password of the .p12'
     required: true
   api-key:
-    description: 'App Store Connect API key（.p8 内容的 base64），公证用'
+    description: 'App Store Connect API key (base64 of the .p8 contents), used for notarization'
     required: true
   api-key-id:
     description: 'App Store Connect API key id'
@@ -23,38 +25,38 @@ inputs:
     description: 'App Store Connect API issuer id'
     required: true
   project:
-    description: '.xcodeproj 相对路径'
+    description: 'path to the .xcodeproj'
     required: true
   scheme:
-    description: 'scheme 名'
+    description: 'scheme name'
     required: true
   version:
     description: 'MARKETING_VERSION'
     required: true
   build-number:
-    description: 'CFBundleVersion；留空则按 x*10000 + y*100 + z 从 version 推'
+    description: 'CFBundleVersion; when empty it is derived from version as x*10000 + y*100 + z'
     required: false
     default: ''
   signing-identity:
-    description: '签名身份全名；留空则从 keychain 里挑第一个 Developer ID Application'
+    description: 'full name of the signing identity; when empty the first Developer ID Application in the keychain is used'
     required: false
     default: ''
   volume-name:
-    description: 'DMG 卷名；留空则取 .app 的名字'
+    description: 'DMG volume name; when empty the .app name is used'
     required: false
     default: ''
   dmg-name:
-    description: '输出文件名；留空则为 <App>-macos.dmg'
+    description: 'output file name; when empty it is <App>-macos.dmg'
     required: false
     default: ''
   working-directory:
-    description: 'monorepo 里项目所在目录'
+    description: 'directory the project lives in, for monorepos'
     required: false
     default: '.'
 
 outputs:
   dmg-path:
-    description: '公证并盖章后的 .dmg 绝对路径'
+    description: 'absolute path of the notarized and stapled .dmg'
     value: ${{ steps.dmg.outputs.dmg-path }}
 
 runs:
